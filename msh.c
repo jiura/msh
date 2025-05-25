@@ -1,5 +1,3 @@
-// TODO: Make "quit" an alias for "exit"
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,17 +10,29 @@
 #define MSH_TOK_BUFSIZE 64
 #define MSH_TOK_DELIM " \t\r\n\a"
 
-/*-- CODE FOR BUILT IN COMMANDS --*/
+/*-- BUILT-IN COMMANDS START --*/
+
+typedef struct {
+	char *name;
+	char *desc;
+	int (*func)(char **);
+} Builtin;
 
 int msh_cd(char **args);
 int msh_help(char **args);
 int msh_exit(char **args);
 
-char *builtin_str[] = {"cd", "help", "exit"};
+Builtin builtins[] = {
+	{.name = "cd", .desc = "change the working directory", .func = &msh_cd},
+	{.name = "help", .desc = "list built-in commands", .func = &msh_help},
+	{.name = "exit",
+	 .desc = "terminate shell; same as \"quit\"",
+	 .func = &msh_exit},
+	{.name = "quit",
+	 .desc = "terminate shell; same as \"exit\"",
+	 .func = &msh_exit}};
 
-int (*builtin_func[])(char **) = {&msh_cd, &msh_help, &msh_exit};
-
-int msh_num_builtins() { return sizeof(builtin_str) / sizeof(*builtin_str); }
+int msh_num_builtins() { return sizeof(builtins) / sizeof(*builtins); }
 
 int msh_cd(char **args) {
 	if (args[1] == NULL) {
@@ -35,24 +45,21 @@ int msh_cd(char **args) {
 }
 
 int msh_help(char **args) {
-	printf("\nMyShell\n\n");
+	printf("\nmsh\n\n");
 	printf("Following cmds are built in:\n\n");
 
 	for (int i = 0; i < msh_num_builtins(); ++i) {
-		printf("  %s\n", builtin_str[i]);
+		printf("\t%s - %s\n", builtins[i].name, builtins[i].desc);
 	}
 
 	printf("\nUse the man command for information on other programs.\n\n");
+
 	return 1;
 }
 
 int msh_exit(char **args) { return 0; }
 
-/*-- END --*/
-
-void msh_loop(void) {
-
-}
+/*-- BUILT-IN COMMANDS END --*/
 
 int main(int argc, char **argv) {
 	/*-- LOAD CONFIG FILES START --*/
@@ -122,10 +129,10 @@ int main(int argc, char **argv) {
 			goto status_found;
 		}
 
-		// Launch builtin
+		// Launch built-in
 		for (int i = 0; i < msh_num_builtins(); ++i) {
-			if (strcmp(args[0], builtin_str[i]) == 0) {
-				status = (*builtin_func[i])(args);
+			if (strcmp(args[0], builtins[i].name) == 0) {
+				status = (*builtins[i].func)(args);
 				goto status_found;
 			}
 		}
