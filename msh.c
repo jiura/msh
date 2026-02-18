@@ -1,65 +1,118 @@
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <fcntl.h>
+
+#include "builtins.c"
 
 #define MSH_RL_BUFSIZE 1024
-#define MSH_TOK_BUFSIZE 64
+#define MSH_TOK_BUFSIZE 16
 #define MSH_TOK_DELIM " \t\r\n\a"
+#define MAX_PATH_SIZE 1024
+#define PIPE_DELIM ">|"
 
-/*-- BUILT-IN COMMANDS START --*/
+#define COOL_BLUE(s) "\x1b[38;5;68m" s "\x1b[0m"
+
+#define bool uint8_t;
+
+typedef enum {
+	CMDOUT_NORMAL,
+	CMDOUT_FILE,
+	CMDOUT_PIPE
+} CmdOutMode;
 
 typedef struct {
-	char *name;
-	char *desc;
-	int (*func)(char **);
-} Builtin;
+	const char *filePath;
+	CmdOutMode	outMode;
+} CmdOptions;
 
-int msh_cd(char **args);
-int msh_help(char **args);
-int msh_exit(char **args);
+typedef struct {
+	char **items;
+	size_t count;
+} Args;
 
-Builtin builtins[] = {
-	{.name = "cd", .desc = "change the working directory", .func = &msh_cd},
-	{.name = "help", .desc = "list built-in commands", .func = &msh_help},
-	{.name = "exit",
-	 .desc = "terminate shell; same as \"quit\"",
-	 .func = &msh_exit},
-	{.name = "quit",
-	 .desc = "terminate shell; same as \"exit\"",
-	 .func = &msh_exit}};
+typedef struct {
+	CmdOptions opts;
+	Args	   args;
+} Cmd;
 
-int msh_num_builtins() { return sizeof(builtins) / sizeof(*builtins); }
+typedef struct {
+	Cmd	  *items;
+	size_t count;
+	size_t cap;
+} da_Cmd;
 
-int msh_cd(char **args) {
-	if (args[1] == NULL) {
-		fprintf(stderr, "msh: expected argument to \"cd\"\n");
-	} else if (chdir(args[1]) != 0) {
-		perror("lsh");
+#define DA_DEFAULT_CAP 16
+#define da_append(xs, x)                                              \
+	do {                                                              \
+		if (xs.count >= xs.cap) {                                     \
+			if (xs.cap == 0)                                          \
+				xs.cap = DA_DEFAULT_CAP;                              \
+			else                                                      \
+				xs.cap *= 2;                                          \
+			xs.items = realloc(xs.items, xs.cap * sizeof(*xs.items)); \
+		}                                                             \
+		xs.items[xs.count++] = x;                                     \
+	} while (0)
+
+int execCmd(Cmd *cmd) {
+	int status = 0;
+
+	// Empty command
+	if (cmd->args.items[0] == NULL) {
+		status = 1;
+		goto status_found;
 	}
 
-	return 1;
-}
-
-int msh_help(char **args) {
-	printf("\nmsh\n\n");
-	printf("Following cmds are built in:\n\n");
-
+	// Launch built-in
 	for (int i = 0; i < msh_num_builtins(); ++i) {
-		printf("\t%s - %s\n", builtins[i].name, builtins[i].desc);
+		if (strcmp(cmd->args.items[0], builtins[i].name) == 0) {
+			status = (*builtins[i].func)(cmd->args.items);
+			goto status_found;
+		}
 	}
 
-	printf("\nUse the man command for information on other programs.\n\n");
+	// Launch process
+	pid_t pid, wpid;
 
-	return 1;
+	pid = fork();
+	if (pid == 0) {
+		// Child process
+
+		if (cmd->opts.outMode == CMDOUT_FILE) {
+			int fd = open(cmd->opts.filePath,
+						  O_CREAT | O_CLOEXEC | O_WRONLY | O_TRUNC,
+						  S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);  // 0644
+			dup2(fd, STDOUT_FILENO);
+			close(fd);
+		}
+
+		// NOTE: First item of args must be program name
+		if (execvp(cmd->args.items[0], cmd->args.items) == -1) {
+			perror("msh");
+		}
+
+		// NOTE: If execvp() returns, something went wrong
+		exit(EXIT_FAILURE);
+	} else if (pid < 0) {
+		// Error forking
+		perror("msh");
+	} else {
+		do {
+			// TODO: Could I let process run on background instead?
+			wpid = waitpid(pid, &status, WUNTRACED);
+		} while (!WIFEXITED(status) && !WIFSIGNALED(status));
+	}
+
+	status = 1;
+
+status_found:
+	return status;
 }
-
-int msh_exit(char **args) { return 0; }
-
-/*-- BUILT-IN COMMANDS END --*/
 
 int main(int argc, char **argv) {
 	/*-- LOAD CONFIG FILES START --*/
@@ -67,19 +120,27 @@ int main(int argc, char **argv) {
 
 	/*-- COMMAND LOOP START --*/
 	char *line;
-	char **args;
-	int status;
+	int	  status;
+
+	da_Cmd cmds = {0};
+
+	char pathBuf[MAX_PATH_SIZE];
 
 	do {
-		printf("> ");
+		if (getcwd(pathBuf, MAX_PATH_SIZE)) {
+			printf(COOL_BLUE("%s"), strcat(pathBuf, " > "));
+		} else {
+			printf(COOL_BLUE("Max path size exceeded > "));
+		}
 
+		// TODO: Also get next line if current ends in / (slash)
 		{ /* Read input line */
-			line = NULL;
+			line		   = NULL;
 			size_t bufsize = 0;
 
 			if (getline(&line, &bufsize, stdin) == -1) {
 				if (feof(stdin)) {
-					exit(EXIT_SUCCESS); // EOF received
+					exit(EXIT_SUCCESS);	 // EOF received
 				} else {
 					perror("readline");
 					exit(EXIT_FAILURE);
@@ -91,86 +152,98 @@ int main(int argc, char **argv) {
 			int bufsize = MSH_TOK_BUFSIZE, position = 0;
 
 			char *token;
-			args = malloc(bufsize * sizeof(*args));
 
-			if (!args) {
+			char **argsBuf = malloc(bufsize * sizeof(*argsBuf));
+			if (!argsBuf) {
 				fprintf(stderr, "msh: allocation error\n");
 				exit(EXIT_FAILURE);
 			}
 
-			// NOTE: strtok_r updates the address pointed by the third
+			// TODO: Respect quotes/escapes when handling delims
+
+			// NOTE: strtok_r updates the address pointed to by the third
 			// parameter to the next token's every time it is called.
-			// Use tmp to keep original address on line so it can be
+			// Using tmp to keep original address on line so it can be
 			// freed later
 			char *tmp_line = line;
+
 			while ((token = strtok_r(tmp_line, MSH_TOK_DELIM, &tmp_line))) {
-				args[position] = token;
-				++position;
+				if (!argsBuf) {
+					char **newArgsBuf = malloc(bufsize * sizeof(*newArgsBuf));
+					argsBuf			  = newArgsBuf;
+				}
 
-				if (position >= bufsize) {
-					bufsize += MSH_TOK_BUFSIZE;
-					args = realloc(args, bufsize * sizeof(*args));
+				size_t tokenLen = strlen(token);
 
-					if (!args) {
-						fprintf(stderr, "msh: allocation error\n");
-						exit(EXIT_FAILURE);
+				if (tokenLen == 1) {
+					switch (token[0]) {
+						case '>': {
+							argsBuf[position]	   = NULL;
+							const char *path	   = strtok_r(tmp_line, MSH_TOK_DELIM, &tmp_line);
+							CmdOptions	newCmdOpts = {.outMode = CMDOUT_FILE, .filePath = path};
+							Args		newCmdArgs = {.items = argsBuf, .count = position};
+							Cmd			newCmd	   = {newCmdOpts, newCmdArgs};
+							da_append(cmds, newCmd);
+
+							break;
+						}
+
+						case '|': {
+							// TODO
+							break;
+						}
+
+						default:
+							goto normal_arg;
+					}
+
+					position = 0;
+					argsBuf	 = NULL;
+				} else if (tokenLen == 2) {
+					// TODO
+					goto normal_arg;
+				} else {
+				normal_arg:
+					argsBuf[position++] = token;
+
+					if (position >= bufsize) {
+						bufsize += MSH_TOK_BUFSIZE;
+						argsBuf = realloc(argsBuf, bufsize * sizeof(*argsBuf));
+
+						if (!argsBuf) {
+							fprintf(stderr, "msh: allocation error\n");
+							exit(EXIT_FAILURE);
+						}
 					}
 				}
 			}
 
-			args[position] = NULL;
-		}
+			if (argsBuf) {
+				argsBuf[position] = NULL;
 
-		/* Execute command */
+				CmdOptions newCmdOpts = {.outMode = CMDOUT_NORMAL, .filePath = NULL};
+				Args	   newCmdArgs = {.items = argsBuf, .count = position};
+				Cmd		   newCmd	  = {.opts = newCmdOpts, .args = newCmdArgs};
+				da_append(cmds, newCmd);
 
-		// Empty command
-		if (args[0] == NULL) {
-			status = 1;
-			goto status_found;
-		}
-
-		// Launch built-in
-		for (int i = 0; i < msh_num_builtins(); ++i) {
-			if (strcmp(args[0], builtins[i].name) == 0) {
-				status = (*builtins[i].func)(args);
-				goto status_found;
+				argsBuf = NULL;
 			}
 		}
 
-		// Launch process
-		pid_t pid, wpid;
-
-		pid = fork();
-		if (pid == 0) {
-			// Child process
-
-			// NOTE: First item of args must be program name
-			if (execvp(args[0], args) == -1) {
-				perror("msh");
-			}
-
-			// NOTE: If execvp() returns, something went wrong
-			exit(EXIT_FAILURE);
-		} else if (pid < 0) {
-			// Error forking
-
-			perror("msh");
-		} else {
-			do {
-				// TODO: Could I let process run on background instead?
-				wpid = waitpid(pid, &status, WUNTRACED);
-			} while (!WIFEXITED(status) && !WIFSIGNALED(status));
+		/* Execute commands */
+		for (int i = 0; i < cmds.count; ++i) {
+			status = execCmd(&cmds.items[i]);
+			free(cmds.items[i].args.items);
 		}
 
-		status = 1;
+		cmds.count = 0;
 
-	status_found:
 		free(line);
-		free(args);
 	} while (status);
 	/*-- COMMAND LOOP END --*/
 
 	/*-- SHUTDOWN/CLEANUP START --*/
+	free(cmds.items);
 	/*-- SHUTDOWN/CLEANUP END --*/
 
 	return EXIT_SUCCESS;

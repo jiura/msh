@@ -1,7 +1,7 @@
 #!/bin/bash
 
-mkdir -p ./build
-gcc -o ./build/msh msh.c
+mkdir -p ./bin
+gcc -o ./bin/msh msh.c
 
 if [ $? -eq 0 ]; then
 	echo "Compilation succesful!"

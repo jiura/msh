@@ -1,0 +1,9 @@
+#!/bin/bash
+mkdir -p ./bin
+gcc -o ./bin/msh-debug msh.c
+
+if [ $? -eq 0 ]; then
+	./bin/msh-debug
+else
+	echo "Compilation failed."
+fi
